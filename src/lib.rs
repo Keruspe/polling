@@ -75,7 +75,11 @@ macro_rules! syscall {
 }
 
 cfg_if! {
-    if #[cfg(any(target_os = "linux", target_os = "android"))] {
+    if #[cfg(feature = "mio")] {
+        mod timerfd;
+        mod mio;
+        use crate::mio as sys;
+    } else if #[cfg(any(target_os = "linux", target_os = "android"))] {
         mod timerfd;
         mod epoll;
         use epoll as sys;

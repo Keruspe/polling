@@ -23,6 +23,7 @@ std = []
 [dependencies]
 cfg-if = "1"
 log = "0.4.11"
+mio = { version = "0.8.1", features = ["net", "os-ext"], optional = true }
 
 [target.'cfg(any(unix, target_os = "fuchsia", target_os = "vxworks"))'.dependencies]
 libc = "0.2.77"
