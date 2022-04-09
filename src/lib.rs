@@ -76,6 +76,7 @@ macro_rules! syscall {
 
 cfg_if! {
     if #[cfg(any(target_os = "linux", target_os = "android"))] {
+        mod timerfd;
         mod epoll;
         use epoll as sys;
     } else if #[cfg(any(

@@ -2,10 +2,11 @@
 
 use std::convert::TryInto;
 use std::io;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::ptr;
 use std::time::Duration;
 
+use crate::timerfd::TimerFd;
 use crate::Event;
 
 /// Interface to epoll.
@@ -16,7 +17,7 @@ pub struct Poller {
     /// File descriptor for the eventfd that produces notifications.
     event_fd: RawFd,
     /// File descriptor for the timerfd that produces timeouts.
-    timer_fd: Option<RawFd>,
+    timer_fd: Option<TimerFd>,
 }
 
 impl Poller {
@@ -49,13 +50,7 @@ impl Poller {
 
         // Set up eventfd and timerfd.
         let event_fd = syscall!(eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK))?;
-        let timer_fd = syscall!(syscall(
-            libc::SYS_timerfd_create,
-            libc::CLOCK_MONOTONIC as libc::c_int,
-            (libc::TFD_CLOEXEC | libc::TFD_NONBLOCK) as libc::c_int,
-        ))
-        .map(|fd| fd as libc::c_int)
-        .ok();
+        let timer_fd = TimerFd::new().ok();
 
         let poller = Poller {
             epoll_fd,
@@ -63,8 +58,8 @@ impl Poller {
             timer_fd,
         };
 
-        if let Some(timer_fd) = timer_fd {
-            poller.add(timer_fd, Event::none(crate::NOTIFY_KEY))?;
+        if let Some(timer_fd) = poller.timer_fd.as_ref() {
+            poller.add(timer_fd.as_raw_fd(), Event::none(crate::NOTIFY_KEY))?;
         }
 
         poller.add(
@@ -80,7 +75,7 @@ impl Poller {
             "new: epoll_fd={}, event_fd={}, timer_fd={:?}",
             epoll_fd,
             event_fd,
-            timer_fd
+            poller.timer_fd
         );
         Ok(poller)
     }
@@ -107,30 +102,13 @@ impl Poller {
     pub fn wait(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<()> {
         log::trace!("wait: epoll_fd={}, timeout={:?}", self.epoll_fd, timeout);
 
-        if let Some(timer_fd) = self.timer_fd {
+        if let Some(timer_fd) = self.timer_fd.as_ref() {
             // Configure the timeout using timerfd.
-            let new_val = libc::itimerspec {
-                it_interval: TS_ZERO,
-                it_value: match timeout {
-                    None => TS_ZERO,
-                    Some(t) => libc::timespec {
-                        tv_sec: t.as_secs() as libc::time_t,
-                        tv_nsec: (t.subsec_nanos() as libc::c_long).into(),
-                    },
-                },
-            };
-
-            syscall!(syscall(
-                libc::SYS_timerfd_settime,
-                timer_fd as libc::c_int,
-                0 as libc::c_int,
-                &new_val as *const libc::itimerspec,
-                ptr::null_mut() as *mut libc::itimerspec
-            ))?;
+            timer_fd.set_timeout(timeout)?;
 
             // Set interest in timerfd.
             self.modify(
-                timer_fd,
+                timer_fd.as_raw_fd(),
                 Event {
                     key: crate::NOTIFY_KEY,
                     readable: true,
@@ -140,7 +118,7 @@ impl Poller {
         }
 
         // Timeout in milliseconds for epoll.
-        let timeout_ms = match (self.timer_fd, timeout) {
+        let timeout_ms = match (self.timer_fd.as_ref(), timeout) {
             (_, Some(t)) if t == Duration::from_secs(0) => 0,
             (None, Some(t)) => {
                 // Round up to a whole millisecond.
@@ -234,21 +212,14 @@ impl Drop for Poller {
             self.timer_fd
         );
 
-        if let Some(timer_fd) = self.timer_fd {
-            let _ = self.delete(timer_fd);
-            let _ = syscall!(close(timer_fd));
+        if let Some(timer_fd) = self.timer_fd.as_ref() {
+            let _ = self.delete(timer_fd.as_raw_fd());
         }
         let _ = self.delete(self.event_fd);
         let _ = syscall!(close(self.event_fd));
         let _ = syscall!(close(self.epoll_fd));
     }
 }
-
-/// `timespec` value that equals zero.
-const TS_ZERO: libc::timespec = libc::timespec {
-    tv_sec: 0,
-    tv_nsec: 0,
-};
 
 /// Epoll flags for all possible readability events.
 fn read_flags() -> libc::c_int {
